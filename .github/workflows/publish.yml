@@ -21,11 +21,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        working-directory: packages/vite-plugin-bake-alpine-components
         run: npm install
 
       - name: Publish
-        working-directory: packages/vite-plugin-bake-alpine-components
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
