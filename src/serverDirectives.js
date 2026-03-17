@@ -288,8 +288,9 @@ export function resolveServerTagDirectives(html, context, runtime) {
           changed = true
           return ''
         }
+        const serialized = typeof val === 'object' ? JSON.stringify(val) : String(val)
         changed = true
-        return ` ${attrName}="${escapeHtml(String(val))}"`
+        return ` ${attrName}="${escapeHtml(serialized)}"`
       } catch {
         return m
       }
