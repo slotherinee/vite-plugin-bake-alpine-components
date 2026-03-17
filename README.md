@@ -1,8 +1,8 @@
 # vite-plugin-bake-alpine-components
 
-A Vite plugin that bakes Alpine.js templates into static HTML at build time.
+A Vite plugin that bakes Alpine.js component hosts into static HTML at build time.
 
-In development everything works dynamically through Alpine.js at runtime. During `vite build` the plugin "bakes" Alpine directives into fully static HTML — no runtime overhead, no JavaScript required for the rendered markup.
+In development everything works dynamically through Alpine.js at runtime. During `vite build` the plugin bakes explicit `s-*` directives into static HTML while leaving runtime Alpine directives untouched.
 
 ## Install
 
@@ -36,45 +36,65 @@ export default defineConfig({
 
 ## Options
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `strict` | `boolean` | `true` | Abort the build on any bake failure. When `false`, failures are logged as warnings and original markup is kept. |
-| `verbose` | `boolean` | `false` | Print detailed logs for each component render and `x-for` expansion. |
-| `validateComponentPaths` | `boolean` | `true` | Verify that every `x-component.url` path points to an existing file before rendering. |
+| Option                   | Type      | Default | Description                                                                                                     |
+| ------------------------ | --------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| `strict`                 | `boolean` | `true`  | Abort the build on any bake failure. When `false`, failures are logged as warnings and original markup is kept. |
+| `verbose`                | `boolean` | `false` | Print detailed logs for each component render and `x-for` expansion.                                            |
+| `validateComponentPaths` | `boolean` | `true`  | Verify that every `x-component.url` path points to an existing file before rendering.                           |
 
-## Supported directives
+## Supported build-time directives
 
-### `x-for`
+### `s-for`
 
 Loops are fully expanded at build time:
 
 ```html
-<template x-for="item in $store.products.items" :key="item.id">
-  <div x-text="item.title"></div>
+<template s-for="item in $store.products.items" :key="item.id">
+  <div s-text="item.title"></div>
 </template>
 ```
 
 Inside loops, `$index` is also available as a context variable.
 
-### `x-text`
+### `s-text`
 
 Values are evaluated and HTML-escaped:
 
 ```html
-<h3 x-text="item.title"></h3>
+<h3 s-text="item.title"></h3>
 <!-- becomes -->
 <h3>My Product</h3>
 ```
+
+### `s-html`
+
+Injects evaluated HTML content at build time.
+
+### `s-class` and `s-style`
+
+Evaluates expression values and merges them into static `class` / `style` attributes.
+
+### `s-show`
+
+Keeps the element in DOM and adds `display: none` when falsy.
+
+### `s-if`
+
+Build-time conditional rendering.
+
+- `<template s-if="expr">...</template>` includes or removes content.
+- `s-if` on a normal element includes or removes that element.
+
+### `s-bind:attr`
+
+Evaluates expression and writes a static attribute value.
 
 ### `x-component.url`
 
 Loads and renders an HTML component file from `public/components/`:
 
 ```html
-<div
-  x-data="{ item: product }"
-  x-component.url="'/components/product-card.html'"
-></div>
+<div x-data="{ item: product }" x-component.url="'/components/product-card.html'"></div>
 ```
 
 ### `x-slot`
@@ -122,9 +142,7 @@ Alpine.start()
 ```
 
 ```html
-<template x-for="item in $store.products.items">
-  ...
-</template>
+<template s-for="item in $store.products.items"> ... </template>
 ```
 
 Store files must use `export default`:
@@ -146,20 +164,18 @@ Components can include other components inside slots:
 ```html
 <section x-data="{ item: outer }" x-component.url="'/components/wrapper.html'">
   <template x-slot>
-    <div
-      x-data="{ item: inner }"
-      x-component.url="'/components/card.html'"
-    ></div>
+    <div x-data="{ item: inner }" x-component.url="'/components/card.html'"></div>
   </template>
 </section>
 ```
 
-## What is NOT baked
+## Runtime directives that are NOT baked
 
-| Directive | Reason |
-|---|---|
-| `x-if` | Intentionally left as runtime — condition logic belongs in the browser |
-| `x-html` | Security — raw HTML injection should remain a deliberate runtime choice |
+| Directive | Reason                                                       |
+| --------- | ------------------------------------------------------------ |
+| `x-*`     | Client-side Alpine reactivity/events remain runtime behavior |
+| `:*`      | Runtime bindings are preserved as-is                         |
+| `@*`      | Event handlers are preserved as-is                           |
 
 ## Multi-page support
 
