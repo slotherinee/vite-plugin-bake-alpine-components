@@ -31,7 +31,7 @@ async function pathExists(targetPath) {
 }
 
 function readAttr(attrs, name) {
-  const escaped = name.replace('.', '\\.')
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const re = new RegExp(`${escaped}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i')
   const match = attrs.match(re)
   return match ? match[2] : ''
@@ -210,17 +210,68 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;')
 }
 
+// Parse :attr="expr" and x-bind:attr="expr" from host element attrs.
+// Returns an object of evaluated prop values.
+const SKIP_PROPS = new Set(['class', 'style', 'id', 'key'])
+
+function parsePropBindings(attrsRaw, context, runtime) {
+  const props = {}
+  const bindRe = /(?:x-bind:|:)([a-zA-Z_$][\w$]*)(?:\.[a-z]+)*\s*=\s*(["'])([\s\S]*?)\2/g
+  let m = null
+
+  while ((m = bindRe.exec(attrsRaw)) !== null) {
+    const name = m[1]
+    const expr = m[3]
+
+    if (SKIP_PROPS.has(name)) continue
+    // Skip x-component directive modifiers passed as binding
+    if (name === 'component') continue
+
+    try {
+      props[name] = evalInContext(expr, context)
+    } catch (error) {
+      runtime.warn(
+        `[bake-alpine-components] Could not evaluate prop binding :${name}="${expr}": ${error.message}`
+      )
+    }
+  }
+
+  return props
+}
+
+// Strip all Alpine RC directives and prop bindings from a host element's attrs string.
+function stripHostAttrs(attrsRaw) {
+  return attrsRaw
+    .replace(/\s*x-data\s*=\s*(["'])[\s\S]*?\1/gi, '')
+    .replace(/\s*x-component(?:\.[a-z-]+)*\s*=\s*(["'])[\s\S]*?\1/gi, '')
+    .replace(/\s*x-component-styles\s*=\s*(["'])[\s\S]*?\1/gi, '')
+    .replace(/\s*styles\s*=\s*(["'])[\s\S]*?\1/gi, '')
+    .replace(/\s*(?:x-bind:|:)(?!class\b|style\b|id\b)[a-zA-Z_$][\w$]*(?:\.[a-z]+)*\s*=\s*(["'])[\s\S]*?\1/gi, '')
+}
+
 function stripDirectiveAttributes(html) {
   return html
     .replace(/\s+x-data\s*=\s*(["'])[\s\S]*?\1/gi, '')
-    .replace(/\s+x-component\.url\s*=\s*(["'])[\s\S]*?\1/gi, '')
+    .replace(/\s+x-component(?:\.[a-z-]+)*\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+x-component-styles\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+styles\s*=\s*(["'])[\s\S]*?\1/gi, '')
-    .replace(/\s+x-component\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+x-text\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s*:key\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+x-slot\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+x-slot\b/gi, '')
+}
+
+// Extract <style> and <style scoped> blocks from HTML, returning { html, styles }.
+// Styles are deduplicated by content hash across the whole bake run via the passed Set.
+function extractStyles(html, collectedStyles, seenStyles) {
+  return html.replace(/<style(\s[^>]*)?>[\s\S]*?<\/style>/gi, (match) => {
+    const cssText = match.replace(/<style[^>]*>/, '').replace(/<\/style>/, '').trim()
+    if (cssText && !seenStyles.has(cssText)) {
+      seenStyles.add(cssText)
+      collectedStyles.push(cssText)
+    }
+    return ''
+  })
 }
 
 function normalizeAttrs(attrs) {
@@ -287,30 +338,42 @@ function renderLoopsAndText(html, context, runtime) {
   return withText
 }
 
-function renderComponentHosts(templateChunk, context, rootDir, runtime, stack = new Set()) {
+function renderComponentHosts(templateChunk, context, rootDir, runtime, stack, collectedStyles, seenStyles) {
+  // Matches x-component.url, x-component.url.scoped, x-component.url.isolated, etc.
   const hostRe =
-    /<([a-z0-9-]+)([^>]*\bx-component\.url\s*=\s*(?:"[^"]*"|'[^']*')[^>]*)>([\s\S]*?)<\/\1>/gi
+    /<([a-z0-9-]+)([^>]*\bx-component(?:\.[a-z-]+)*\s*=\s*(?:"[^"]*"|'[^']*')[^>]*)>([\s\S]*?)<\/\1>/gi
 
   return templateChunk.replace(hostRe, (full, tag, attrsRaw, inner) => {
-    const xDataExpr = readAttr(attrsRaw, 'x-data')
-    const sourceExpr = readAttr(attrsRaw, 'x-component.url')
-    if (!xDataExpr || !sourceExpr) {
-      const message =
-        '[bake-alpine-components] x-component.url host must have both x-data and x-component.url'
+    const sourceExpr = readAttr(attrsRaw, 'x-component') ||
+      // Try x-component.url and x-component.url.* variants
+      (() => {
+        const m = attrsRaw.match(/x-component(?:\.[a-z-]+)+\s*=\s*(["'])([\s\S]*?)\1/i)
+        return m ? m[2] : ''
+      })()
+
+    if (!sourceExpr) {
+      const message = '[bake-alpine-components] x-component host is missing a source expression'
       if (runtime.strict) throw new Error(`${message}\nHTML: ${truncate(full)}`)
       runtime.warn(`${message}\nHTML: ${truncate(full)}`)
       return full
     }
 
-    const xData = evalInContextOrThrow(xDataExpr, context, runtime, {
-      where: 'x-component host x-data',
-      htmlSnippet: full,
-    })
-    if (xData === undefined && !runtime.strict) return full
+    // Support both legacy x-data and new :attr prop bindings
+    const xDataExpr = readAttr(attrsRaw, 'x-data')
+    let xData = {}
+    if (xDataExpr) {
+      xData = evalInContextOrThrow(xDataExpr, context, runtime, {
+        where: 'x-component host x-data',
+        htmlSnippet: full,
+      }) ?? {}
+    }
+
+    // Parse :attr="expr" prop bindings (alpine-rc style)
+    const propBindings = parsePropBindings(attrsRaw, context, runtime)
 
     const componentPath = resolveSourcePath(rootDir, sourceExpr)
     if (!componentPath) {
-      const message = `[bake-alpine-components] Could not resolve component path from x-component.url: ${sourceExpr}`
+      const message = `[bake-alpine-components] Could not resolve component path: ${sourceExpr}`
       if (runtime.strict) throw new Error(message)
       runtime.warn(message)
       return full
@@ -320,13 +383,12 @@ function renderComponentHosts(templateChunk, context, rootDir, runtime, stack = 
     const nextStack = new Set(stack)
     nextStack.add(componentPath)
 
-    const attrs = `${attrsRaw}`
-      .replace(/\s*x-data\s*=\s*(["'])[\s\S]*?\1/i, '')
-      .replace(/\s*x-component\.url\s*=\s*(["'])[\s\S]*?\1/i, '')
-      .replace(/\s*x-component-styles\s*=\s*(["'])[\s\S]*?\1/i, '')
-      .replace(/\s*styles\s*=\s*(["'])[\s\S]*?\1/i, '')
+    // Strip all RC-related attrs from the host element output
+    const attrs = stripHostAttrs(attrsRaw)
 
-    const resolvedContext = { ...context, ...xData }
+    // Merge context: parent → x-data (legacy) → :attr props (alpine-rc)
+    const resolvedContext = { ...context, ...xData, ...propBindings }
+
     const componentHtml = resolvedContext.__componentHTML__[componentPath] ?? ''
     if (!componentHtml) {
       const message = `[bake-alpine-components] Component not found in cache: ${componentPath}`
@@ -351,7 +413,9 @@ function renderComponentHosts(templateChunk, context, rootDir, runtime, stack = 
         resolvedContext,
         rootDir,
         runtime,
-        nextStack
+        nextStack,
+        collectedStyles,
+        seenStyles,
       )
       slotMap[slotName] = stripDirectiveAttributes(
         renderLoopsAndText(slotTemplate, resolvedContext, runtime)
@@ -363,9 +427,14 @@ function renderComponentHosts(templateChunk, context, rootDir, runtime, stack = 
       resolvedContext,
       rootDir,
       runtime,
-      nextStack
+      nextStack,
+      collectedStyles,
+      seenStyles,
     )
     let rendered = renderLoopsAndText(nestedRendered, resolvedContext, runtime)
+
+    // Extract <style> blocks and collect them for <head> injection
+    rendered = extractStyles(rendered, collectedStyles, seenStyles)
 
     rendered = rendered.replace(
       /<slot\s+name\s*=\s*(["'])([\s\S]*?)\1\s*><\/slot>/gi,
@@ -385,12 +454,13 @@ function renderComponentHosts(templateChunk, context, rootDir, runtime, stack = 
 
 async function buildComponentCache(html, rootDir, runtime) {
   const sources = new Set()
-  const sourceRe = /x-component\.url\s*=\s*(["'])([\s\S]*?)\1/gi
+  // Match x-component.url, x-component.url.scoped, x-component.url.isolated, etc.
+  const sourceRe = /x-component(?:\.[a-z-]+)*\s*=\s*(["'])([\s\S]*?)\1/gi
   let m = null
 
   while ((m = sourceRe.exec(html)) !== null) {
     const fullPath = resolveSourcePath(rootDir, m[2])
-    sources.add(fullPath)
+    if (fullPath) sources.add(fullPath)
   }
 
   const cache = {}
@@ -478,6 +548,10 @@ export default function bakeAlpineComponentsPlugin(options = {}) {
 
       rootData.__componentHTML__ = componentCache
 
+      // Collected <style> blocks from all components — injected into <head>
+      const collectedStyles = []
+      const seenStyles = new Set()
+
       const xForRe = /<template\s+[^>]*x-for\s*=\s*(["'])([\s\S]*?)\1[^>]*>([\s\S]*?)<\/template>/gi
 
       const baked = html.replace(xForRe, (full, _q, forExpr, inner) => {
@@ -511,14 +585,20 @@ export default function bakeAlpineComponentsPlugin(options = {}) {
         return list
           .map((item) => {
             const loopContext = { ...rootData, [alias]: item }
-            const chunk = renderComponentHosts(inner, loopContext, rootDir, runtime, new Set())
+            const chunk = renderComponentHosts(inner, loopContext, rootDir, runtime, new Set(), collectedStyles, seenStyles)
             return chunk
           })
           .join('')
       })
 
-      const withStandaloneHosts = renderComponentHosts(baked, rootData, rootDir, runtime, new Set())
-      const staticHtml = withStandaloneHosts
+      const withStandaloneHosts = renderComponentHosts(baked, rootData, rootDir, runtime, new Set(), collectedStyles, seenStyles)
+
+      // Inject collected component styles into <head>
+      let staticHtml = withStandaloneHosts
+      if (collectedStyles.length > 0) {
+        const styleTag = `<style data-baked-components>\n${collectedStyles.join('\n')}\n</style>`
+        staticHtml = staticHtml.replace('</head>', `${styleTag}\n</head>`)
+      }
 
       try {
         return await prettierFormat(staticHtml, {
