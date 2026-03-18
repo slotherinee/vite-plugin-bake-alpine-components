@@ -73,7 +73,14 @@ async function evalAlpineStore(mainSource, storeName, rootDir, mainPath) {
     `Alpine\\.store\\(\\s*(["'])${escaped}\\1\\s*,\\s*(\\{[\\s\\S]*?\\})\\s*\\)`
   )
   const inlineMatch = mainSource.match(inlineRe)
-  if (inlineMatch) return evalObjectExpression(inlineMatch[2])
+  if (inlineMatch) {
+    try {
+      return evalObjectExpression(inlineMatch[2])
+    } catch {
+      // store object contains methods/functions — cannot be statically evaluated, skip
+      return null
+    }
+  }
 
   const namedRe = new RegExp(
     `Alpine\\.store\\(\\s*(["'])${escaped}\\1\\s*,\\s*([a-zA-Z_$][\\w$]*)\\s*\\)`

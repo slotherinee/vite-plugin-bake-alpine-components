@@ -106,7 +106,17 @@ export function renderComponentHosts(
     const nextStack = new Set(stack)
     nextStack.add(componentPath)
 
-    const propBindings = parsePropBindings(attrsRaw, context, runtime)
+    const { props: propBindings, anyFailed } = parsePropBindings(attrsRaw, context, runtime)
+
+    // If ALL prop bindings failed to evaluate, the component is inside a runtime loop
+    // (e.g. x-for). Leave it as-is for alpine-rc to handle at runtime.
+    if (anyFailed) {
+      output += full
+      cursor = close.end
+      hostOpenRe.lastIndex = close.end
+      continue
+    }
+
     const propContext = { ...context, ...propBindings }
     const strippedHostAttrs = stripHostAttrs(attrsRaw)
 

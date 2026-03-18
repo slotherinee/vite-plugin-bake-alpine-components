@@ -4,6 +4,8 @@ const SKIP_PROPS = new Set(['class', 'style', 'id', 'key'])
 
 export function parsePropBindings(attrsRaw, context, runtime) {
   const props = {}
+  let attempted = 0
+  let failed = 0
   const bindRe = /(?:x-bind:|:)([a-zA-Z_$][\w$]*)(?:\.[a-z]+)*\s*=\s*(["'])([\s\S]*?)\2/g
   let m = null
   while ((m = bindRe.exec(attrsRaw)) !== null) {
@@ -11,15 +13,17 @@ export function parsePropBindings(attrsRaw, context, runtime) {
     const expr = m[3]
     if (SKIP_PROPS.has(name)) continue
     if (name === 'component') continue
+    attempted++
     try {
       props[name] = evalInContext(expr, context)
     } catch (error) {
+      failed++
       runtime.warn(
         `[bake-alpine-components] Could not evaluate prop :${name}="${expr}": ${error.message}`
       )
     }
   }
-  return props
+  return { props, anyFailed: failed > 0 && failed === attempted }
 }
 
 export function stripHostAttrs(attrsRaw) {

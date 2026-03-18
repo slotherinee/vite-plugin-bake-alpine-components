@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-bake-alpine-components",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Vite plugin that bakes Alpine.js components and directives into static HTML at build time",
   "type": "module",
   "main": "./index.js",

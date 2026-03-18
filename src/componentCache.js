@@ -41,18 +41,21 @@ function extractOnPageTemplateById(html, id) {
   return html.slice(openEnd, close.start).trim()
 }
 
-export async function buildComponentCache(html, rootDir, runtime) {
-  const fileSources = new Set()
-  const onPageIds = new Set()
-
+function collectComponentRefs(source, rootDir) {
+  const paths = new Set()
   const urlRe = /x-component\.[a-z-]+(?:\.[a-z-]+)*\s*=\s*(["'])([\s\S]*?)\1/gi
+  let m = null
+  while ((m = urlRe.exec(source)) !== null) {
+    const fullPath = resolveSourcePath(rootDir, m[2])
+    if (fullPath) paths.add(fullPath)
+  }
+  return paths
+}
+
+export async function buildComponentCache(html, rootDir, runtime) {
+  const onPageIds = new Set()
   const onPageRe = /\bx-component\s*=\s*(["'])([\s\S]*?)\1/gi
   let m = null
-
-  while ((m = urlRe.exec(html)) !== null) {
-    const fullPath = resolveSourcePath(rootDir, m[2])
-    if (fullPath) fileSources.add(fullPath)
-  }
   while ((m = onPageRe.exec(html)) !== null) {
     const id = parseMaybeQuoted(m[2])
     if (id) onPageIds.add(id)
@@ -60,7 +63,13 @@ export async function buildComponentCache(html, rootDir, runtime) {
 
   const cache = {}
 
-  for (const fullPath of fileSources) {
+  // BFS: start from index.html, recursively discover components referenced in component files
+  const queue = [...collectComponentRefs(html, rootDir)]
+  const visited = new Set(queue)
+
+  while (queue.length > 0) {
+    const fullPath = queue.shift()
+
     if (runtime.validateComponentPaths && !(await pathExists(fullPath))) {
       const msg = `[bake-alpine-components] Component file not found: ${fullPath}`
       if (runtime.strict) throw new Error(msg)
@@ -71,6 +80,14 @@ export async function buildComponentCache(html, rootDir, runtime) {
       const tpl = await fs.readFile(fullPath, 'utf8')
       cache[fullPath] = parseTemplateInner(tpl)
       if (runtime.verbose) runtime.log(`[bake-alpine-components] cache: ${fullPath}`)
+
+      // Discover components referenced inside this component file
+      for (const childPath of collectComponentRefs(tpl, rootDir)) {
+        if (!visited.has(childPath)) {
+          visited.add(childPath)
+          queue.push(childPath)
+        }
+      }
     } catch (error) {
       const msg = `[bake-alpine-components] Could not read component: ${fullPath}\n${error.message}`
       if (runtime.strict) throw new Error(msg)
