@@ -7,6 +7,11 @@ import { evalAlpineProvider, evalAllAlpineStores } from './stores.js'
 import { evalObjectExpression, parseMaybeQuoted, pathExists } from './utils.js'
 
 function convertServerDirectivesForServe(html) {
+  if (/\bs-bind:x-data=/i.test(html)) {
+    console.error(
+      '[bake-alpine-components] s-bind:x-data is not allowed. Use x-data directly — props are available in scope via the host wrapper.'
+    )
+  }
   return html
     .replace(/(<template\b[^>]*\s)s-for=/g, '$1x-for=')
     .replace(/(<template\b[^>]*\s)s-if=/g, '$1x-if=')
@@ -15,6 +20,7 @@ function convertServerDirectivesForServe(html) {
     .replace(/\bs-class=/g, ':class=')
     .replace(/\bs-style=/g, ':style=')
     .replace(/\bs-show=/g, 'x-show=')
+    .replace(/\bs-bind:x-data\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\bs-bind:([a-zA-Z][a-zA-Z0-9-]*)=/g, ':$1=')
     .replace(/\bs-if=/g, 'x-if=')
 }

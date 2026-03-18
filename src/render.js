@@ -1,4 +1,4 @@
-import { normalizeAttrs, parseMaybeQuoted, readAttr, resolveSourcePath, truncate } from './utils.js'
+import { findMatchingClosingTag, normalizeAttrs, parseMaybeQuoted, readAttr, resolveSourcePath, truncate } from './utils.js'
 import {
   collectSlotTemplates,
   extractStyles,
@@ -15,46 +15,27 @@ import {
   stripServerDirectives,
 } from './props.js'
 
-function hasRuntimePropDependency(html, propBindings) {
+function filterRuntimeProps(html, propBindings) {
   const propNames = Object.keys(propBindings)
-  if (propNames.length === 0) return false
+  if (propNames.length === 0) return {}
 
-  const escapedNames = propNames.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const needed = new Set()
   const runtimeAttrRe = /\s(?:x-[\w:-]+|:[\w:-]+|@[\w.$:-]+)\s*=\s*(["'])([\s\S]*?)\1/g
 
   let match = null
   while ((match = runtimeAttrRe.exec(html)) !== null) {
     const expr = match[2]
-    for (const escapedName of escapedNames) {
-      if (new RegExp(`\\b${escapedName}\\b`).test(expr)) return true
+    for (const name of propNames) {
+      if (new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(expr)) {
+        needed.add(name)
+      }
     }
   }
 
-  return false
+  if (needed.size === 0) return {}
+  return Object.fromEntries([...needed].map((name) => [name, propBindings[name]]))
 }
 
-function findMatchingClosingTag(html, tag, fromIndex) {
-  const tokenRe = new RegExp(`<\\/?${tag}(?=[\\s>/])[^>]*>`, 'gi')
-  tokenRe.lastIndex = fromIndex
-
-  let depth = 1
-  while (true) {
-    const match = tokenRe.exec(html)
-    if (!match) return null
-
-    const token = match[0]
-    const isClosing = token.startsWith('</')
-    const isSelfClosing = /\/>\s*$/.test(token)
-
-    if (isClosing) {
-      depth -= 1
-      if (depth === 0) return { start: match.index, end: tokenRe.lastIndex }
-      continue
-    }
-
-    if (!isSelfClosing) depth += 1
-  }
-}
 
 export function renderComponentHosts(
   html,
@@ -182,11 +163,12 @@ export function renderComponentHosts(
 
     rendered = stripServerDirectives(rendered)
 
-    const attrs = hasRuntimePropDependency(rendered, propBindings)
-      ? mergeHostXData(strippedHostAttrs, propBindings)
-      : strippedHostAttrs
-
-    output += `<${tag}${normalizeAttrs(attrs)}>${rendered}</${tag}>`
+    const runtimeProps = filterRuntimeProps(rendered, propBindings)
+    if (Object.keys(runtimeProps).length > 0) {
+      output += `<${tag}${normalizeAttrs(mergeHostXData(strippedHostAttrs, runtimeProps))}>${rendered}</${tag}>`
+    } else {
+      output += rendered
+    }
     cursor = close.end
     hostOpenRe.lastIndex = close.end
   }

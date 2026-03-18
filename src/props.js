@@ -68,7 +68,6 @@ export function stripServerDirectives(html) {
     .replace(/\s+s-show\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+s-bind:[a-zA-Z][a-zA-Z0-9-]*\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+s-if\s*=\s*(["'])[\s\S]*?\1/gi, '')
-    .replace(/\s*:key\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+x-slot\s*=\s*(["'])[\s\S]*?\1/gi, '')
     .replace(/\s+x-slot\b/gi, '')
 }

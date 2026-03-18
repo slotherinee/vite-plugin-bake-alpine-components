@@ -2,6 +2,8 @@ import {
   escapeHtml,
   evalInContext,
   evalInContextOrThrow,
+  findMatchingClosingTag,
+  findTagEndIndex,
   normalizeAttrs,
   resolveClassValue,
 } from './utils.js'
@@ -54,22 +56,6 @@ export function restoreOnPageTemplates(html, blocks) {
   return html.replace(/__ARC_ONPAGE_TEMPLATE_(\d+)__/g, (_m, index) => blocks[Number(index)] ?? '')
 }
 
-function findTagEndIndex(html, startIndex) {
-  let quote = null
-  for (let i = startIndex; i < html.length; i++) {
-    const ch = html[i]
-    if (quote) {
-      if (ch === quote) quote = null
-      continue
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch
-      continue
-    }
-    if (ch === '>') return i
-  }
-  return -1
-}
 
 function findTemplateCloseIndex(html, fromIndex) {
   const closeRe = /<\/template\s*>/gi
@@ -128,18 +114,59 @@ export function collectSlotTemplates(html) {
   return slots
 }
 
+function parseServerTemplates(html, directiveName, callback) {
+  let output = ''
+  let cursor = 0
+  const directiveRe = new RegExp(`\\b${directiveName}\\s*=`, 'i')
+
+  while (cursor < html.length) {
+    // Find next <template
+    const templateStart = html.indexOf('<template', cursor)
+    if (templateStart === -1) break
+
+    // Find end of opening tag — quote-aware, handles > inside attribute values
+    const tagEnd = findTagEndIndex(html, templateStart + 9)
+    if (tagEnd === -1) break
+
+    const openTag = html.slice(templateStart, tagEnd + 1)
+    const openEnd = tagEnd + 1
+
+    if (!directiveRe.test(openTag)) {
+      output += html.slice(cursor, openEnd)
+      cursor = openEnd
+      continue
+    }
+
+    const closeIndex = findTemplateCloseIndex(html, openEnd)
+    if (closeIndex === -1) break
+
+    const closeEnd = closeIndex + '</template>'.length
+    const full = html.slice(templateStart, closeEnd)
+    const inner = html.slice(openEnd, closeIndex)
+
+    output += html.slice(cursor, templateStart)
+    output += callback(full, openTag, inner)
+    cursor = closeEnd
+  }
+
+  output += html.slice(cursor)
+  return output
+}
+
 export function resolveServerFor(html, context, runtime, renderFn) {
-  const sForRe = /<template\s+[^>]*s-for\s*=\s*(["'])([\s\S]*?)\1[^>]*>([\s\S]*?)<\/template>/gi
-  return html.replace(sForRe, (full, _q, forExpr, inner) => {
-    const forMatch = forExpr.match(/^\s*([a-zA-Z_$][\w$]*)\s+in\s+([\s\S]+)$/)
-    if (!forMatch) {
+  return parseServerTemplates(html, 's-for', (full, openTag, inner) => {
+    const forMatch = openTag.match(/\bs-for\s*=\s*(["'])([\s\S]*?)\1/)
+    if (!forMatch) return full
+    const forExpr = forMatch[2]
+    const aliasMatch = forExpr.match(/^\s*([a-zA-Z_$][\w$]*)\s+in\s+([\s\S]+)$/)
+    if (!aliasMatch) {
       const msg = `[bake-alpine-components] Invalid s-for expression: ${forExpr}`
       if (runtime.strict) throw new Error(msg)
       runtime.warn(msg)
       return full
     }
-    const alias = forMatch[1]
-    const list = evalInContextOrThrow(forMatch[2].trim(), context, runtime, {
+    const alias = aliasMatch[1]
+    const list = evalInContextOrThrow(aliasMatch[2].trim(), context, runtime, {
       where: 's-for list',
       htmlSnippet: full,
     })
@@ -156,53 +183,102 @@ export function resolveServerFor(html, context, runtime, renderFn) {
 }
 
 export function resolveServerIf(html, context, runtime) {
-  return html.replace(
-    /<template\s+[^>]*s-if\s*=\s*(["'])([\s\S]*?)\1[^>]*>([\s\S]*?)<\/template>/gi,
-    (full, _q, expr, inner) => {
-      try {
-        return Boolean(evalInContext(expr, context)) ? inner : ''
-      } catch (err) {
-        runtime.warn(`[bake-alpine-components] s-if error: ${expr} — ${err.message}`)
-        return full
-      }
+  return parseServerTemplates(html, 's-if', (full, openTag, inner) => {
+    const ifMatch = openTag.match(/\bs-if\s*=\s*(["'])([\s\S]*?)\1/)
+    if (!ifMatch) return full
+    try {
+      return Boolean(evalInContext(ifMatch[2], context)) ? inner : ''
+    } catch (err) {
+      runtime.warn(`[bake-alpine-components] s-if error: ${ifMatch[2]} — ${err.message}`)
+      return full
     }
-  )
+  })
+}
+
+function resolveElementDirective(html, directiveName, context, transform) {
+  let output = ''
+  let cursor = 0
+  const tagOpenRe = /<([a-z0-9-]+)/gi
+  const directiveRe = new RegExp(`\\s${directiveName}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`)
+
+  while (cursor < html.length) {
+    tagOpenRe.lastIndex = cursor
+    const tagStart = tagOpenRe.exec(html)
+    if (!tagStart) break
+
+    const tag = tagStart[1]
+    const openStart = tagStart.index
+    const tagEnd = findTagEndIndex(html, tagOpenRe.lastIndex)
+
+    if (tagEnd === -1) {
+      output += html.slice(cursor, openStart + 1)
+      cursor = openStart + 1
+      continue
+    }
+
+    const openTag = html.slice(openStart, tagEnd + 1)
+    const openEnd = tagEnd + 1
+    const directiveMatch = openTag.match(directiveRe)
+
+    if (!directiveMatch) {
+      // No directive on this tag — consume just the `<` and continue scanning
+      output += html.slice(cursor, openStart + 1)
+      cursor = openStart + 1
+      continue
+    }
+
+    const expr = directiveMatch[1] ?? directiveMatch[2]
+    const attrsWithout = openTag.replace(directiveRe, '')
+
+    const close = findMatchingClosingTag(html, tag, openEnd)
+    if (!close) {
+      output += html.slice(cursor, openStart + 1)
+      cursor = openStart + 1
+      continue
+    }
+
+    const inner = html.slice(openEnd, close.start)
+    const full = html.slice(openStart, close.end)
+
+    output += html.slice(cursor, openStart)
+    output += transform(full, tag, attrsWithout, expr, inner)
+    cursor = close.end
+    tagOpenRe.lastIndex = cursor
+  }
+
+  output += html.slice(cursor)
+  return output
 }
 
 export function resolveServerTagDirectives(html, context, runtime) {
-  html = html.replace(
-    /<([a-z0-9-]+)([^>]*?)\s+s-if\s*=\s*(["'])([\s\S]*?)\3([^>]*)>([\s\S]*?)<\/\1>/gi,
-    (full, tag, before, _q, expr, after, inner) => {
-      const keep = evalInContextOrThrow(expr, context, runtime, {
-        where: 's-if',
-        htmlSnippet: full,
-      })
-      if (!Boolean(keep)) return ''
-      return `<${tag}${normalizeAttrs(before + after)}>${inner}</${tag}>`
-    }
-  )
+  html = resolveElementDirective(html, 's-if', context, (full, tag, openTag, expr, inner) => {
+    const keep = evalInContextOrThrow(expr, context, runtime, {
+      where: 's-if',
+      htmlSnippet: full,
+    })
+    if (!keep) return ''
+    // openTag already has s-if stripped — extract attrs string from "<tag attrs>"
+    const attrsStr = openTag.slice(tag.length + 1, -1)
+    return `<${tag}${normalizeAttrs(attrsStr)}>${inner}</${tag}>`
+  })
 
-  html = html.replace(
-    /<([a-z0-9-]+)([^>]*?)\s+s-text\s*=\s*(["'])([\s\S]*?)\3([^>]*)>([\s\S]*?)<\/\1>/gi,
-    (full, tag, before, _q, expr, after) => {
-      const text = escapeHtml(
-        evalInContextOrThrow(expr, context, runtime, { where: 's-text', htmlSnippet: full })
-      )
-      return `<${tag}${normalizeAttrs(before + after)}>${text}</${tag}>`
-    }
-  )
+  html = resolveElementDirective(html, 's-text', context, (full, tag, openTag, expr) => {
+    const text = escapeHtml(
+      evalInContextOrThrow(expr, context, runtime, { where: 's-text', htmlSnippet: full })
+    )
+    const attrsStr = openTag.slice(tag.length + 1, -1)
+    return `<${tag}${normalizeAttrs(attrsStr)}>${text}</${tag}>`
+  })
 
-  html = html.replace(
-    /<([a-z0-9-]+)([^>]*?)\s+s-html\s*=\s*(["'])([\s\S]*?)\3([^>]*)>([\s\S]*?)<\/\1>/gi,
-    (full, tag, before, _q, expr, after) => {
-      try {
-        const content = String(evalInContext(expr, context) ?? '')
-        return `<${tag}${normalizeAttrs(before + after)}>${content}</${tag}>`
-      } catch {
-        return full
-      }
+  html = resolveElementDirective(html, 's-html', context, (full, tag, openTag, expr) => {
+    try {
+      const content = String(evalInContext(expr, context) ?? '')
+      const attrsStr = openTag.slice(tag.length + 1, -1)
+      return `<${tag}${normalizeAttrs(attrsStr)}>${content}</${tag}>`
+    } catch {
+      return full
     }
-  )
+  })
 
   html = html.replace(/<([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>/g, (full, tag, attrs) => {
     let out = attrs
@@ -282,6 +358,11 @@ export function resolveServerTagDirectives(html, context, runtime) {
 
     const sBindRe = /\s*s-bind:([a-zA-Z][a-zA-Z0-9-]*)\s*=\s*(["'])([\s\S]*?)\2/g
     out = out.replace(sBindRe, (m, attrName, _q, expr) => {
+      if (attrName === 'x-data') {
+        throw new Error(
+          `[bake-alpine-components] s-bind:x-data is not allowed. Use x-data directly — props are available in scope via the host wrapper.\n  Expression: ${expr}`
+        )
+      }
       try {
         const val = evalInContext(expr, context)
         if (val === false || val == null) {

@@ -94,6 +94,42 @@ export function normalizeAttrs(attrs) {
   return compact ? ` ${compact}` : ''
 }
 
+export function findTagEndIndex(html, startIndex) {
+  let quote = null
+  for (let i = startIndex; i < html.length; i++) {
+    const ch = html[i]
+    if (quote) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '>') return i
+  }
+  return -1
+}
+
+export function findMatchingClosingTag(html, tag, fromIndex) {
+  const tokenRe = new RegExp(`<\\/?${tag}(?=[\\s>/])[^>]*>`, 'gi')
+  tokenRe.lastIndex = fromIndex
+  let depth = 1
+  while (true) {
+    const match = tokenRe.exec(html)
+    if (!match) return null
+    const token = match[0]
+    const isClosing = token.startsWith('</')
+    const isSelfClosing = /\/>\s*$/.test(token)
+    if (isClosing) {
+      depth -= 1
+      if (depth === 0) return { start: match.index, end: tokenRe.lastIndex }
+      continue
+    }
+    if (!isSelfClosing) depth += 1
+  }
+}
+
 export function resolveClassValue(val) {
   if (!val && val !== 0) return ''
   if (typeof val === 'string') return val.trim()
